@@ -63,6 +63,7 @@ typedef struct VariadicInvoker_ {
     void* function;
     int paramCount;
     bool blocking;
+    bool offload;
 } VariadicInvoker;
 
 static VALUE variadic_allocate(VALUE klass);
@@ -98,6 +99,7 @@ variadic_allocate(VALUE klass)
     RB_OBJ_WRITE(obj, &invoker->rbEnums, Qnil);
     RB_OBJ_WRITE(obj, &invoker->rbReturnType, Qnil);
     invoker->blocking = false;
+    invoker->offload = false;
 
     return obj;
 }
@@ -146,6 +148,7 @@ variadic_initialize(VALUE self, VALUE rbFunction, VALUE rbParameterTypes, VALUE 
     RB_OBJ_WRITE(self, &invoker->rbAddress, rbFunction);
     invoker->function = rbffi_AbstractMemory_Cast(rbFunction, &rbffi_pointer_data_type)->address;
     invoker->blocking = RTEST(rb_hash_aref(options, ID2SYM(rb_intern("blocking"))));
+    invoker->offload = rb_hash_aref(options, ID2SYM(rb_intern("blocking"))) == ID2SYM(rb_intern("offload"));
 
 #if defined(X86_WIN32)
     rbConventionStr = rb_funcall2(convention, rb_intern("to_s"), 0, NULL);
@@ -295,7 +298,12 @@ variadic_invoke(VALUE self, VALUE parameterTypes, VALUE parameterValues)
         ffiValues, callbackParameters, callbackCount,
         invoker->rbEnums);
 
-    rbffi_frame_push(&frame);
+    if (invoker->offload) {
+        /* Not linked into this thread's frame stack, see rbffi_CallFunction */
+        frame.exc = Qnil;
+    } else {
+        rbffi_frame_push(&frame);
+    }
 
     if(unlikely(invoker->blocking)) {
         rbffi_blocking_call_t* bc;
@@ -306,6 +314,7 @@ variadic_invoke(VALUE self, VALUE parameterTypes, VALUE parameterValues)
         bc->params = params;
         bc->frame = &frame;
         bc->cif = cif;
+        bc->offload = invoker->offload;
 
         rb_rescue2(rbffi_do_blocking_call, (VALUE) bc, rbffi_save_frame_exception, (VALUE) &frame, rb_eException, (VALUE) 0);
     } else {
@@ -313,7 +322,9 @@ variadic_invoke(VALUE self, VALUE parameterTypes, VALUE parameterValues)
     }
     RB_GC_GUARD(callbackProc);
 
-    rbffi_frame_pop(&frame);
+    if (!invoker->offload) {
+        rbffi_frame_pop(&frame);
+    }
 
     rbffi_save_errno();
 
